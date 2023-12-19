@@ -24,13 +24,21 @@ def clean_text(text):
 
 def extract_text_from_html(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
-    
-    article_body = soup.find('div', class_='tailwind-article-body')
+
+    # List of common class names used for article bodies
+    common_classes = ['tailwind-article-body', 'article-body', 'post-body', 'content', 'main-content', 'story-content']
+
+    article_body = None
+    for class_name in common_classes:
+        article_body = soup.find('div', class_=class_name)
+        if article_body:
+            break
+
     if not article_body:
         return "Article content not found"
 
     article_text = ' '.join(p.get_text() for p in article_body.find_all('p'))
-    
+
     # Clean the extracted text
     clean_article_text = clean_text(article_text)
     return clean_article_text
@@ -51,7 +59,9 @@ def process_author_folder(author_folder):
         print(f"Processing URL {index} of {total_urls} in folder {author_folder}")
         try:
             response = requests.get(url)
+            # print(f"URL: {url}, Status Code: {response.status_code}")
             article_text = extract_text_from_html(response.content)
+            # print(f"Extracted text length for {url}: {len(article_text)}")
             word_count = len(article_text.split())
 
             if word_count >= 50:
@@ -59,18 +69,23 @@ def process_author_folder(author_folder):
         except Exception as e:
             print(f"Error processing URL {url}: {e}")
 
-    json_path = os.path.join(author_folder, 'articles_text.json')
-    with open(json_path, 'w') as file:
-        json.dump(articles_data, file, indent=4)
+    # print("Articles data before compression:", articles_data)  # Debug print
 
-    # Compress the JSON file and remove the original
-    compress_file(json_path)
+    if articles_data:
+        json_path = os.path.join(author_folder, 'articles_text.json')
+        with open(json_path, 'w') as file:
+            json.dump(articles_data, file, indent=4)
+
+        # Compress the JSON file and remove the original
+        compress_file(json_path)
+    else:
+        print("No valid articles to compress.")
 
 def main():
     authors_dir = './authors'  # Replace with your directory path
     author_folders = [os.path.join(authors_dir, f) for f in os.listdir(authors_dir) if os.path.isdir(os.path.join(authors_dir, f))]
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         futures = {executor.submit(process_author_folder, author_folder): author_folder for author_folder in author_folders}
         for future in concurrent.futures.as_completed(futures):
             folder = futures[future]

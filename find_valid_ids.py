@@ -29,9 +29,9 @@ def process_author_id(author_id):
         save_author_id(author_id)
 
 def find_valid_author_ids(start_id, end_id):
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         author_ids = range(start_id, end_id + 1)
         executor.map(process_author_id, author_ids)
 
 # Example usage
-find_valid_author_ids(1, 25000)
+find_valid_author_ids(10208 + 1, 25000)
