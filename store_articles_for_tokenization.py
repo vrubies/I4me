@@ -2,6 +2,10 @@ import os
 import requests
 import json
 from bs4 import BeautifulSoup
+import concurrent.futures
+import gzip
+import shutil
+
 
 def clean_text(text):
     # Replace common HTML entities or Unicode characters
@@ -31,6 +35,12 @@ def extract_text_from_html(html_content):
     clean_article_text = clean_text(article_text)
     return clean_article_text
 
+def compress_file(file_path):
+    with open(file_path, 'rb') as f_in:
+        with gzip.open(file_path + '.gz', 'wb') as f_out:
+            shutil.copyfileobj(f_in, f_out)
+    os.remove(file_path)
+
 def process_author_folder(author_folder):
     with open(os.path.join(author_folder, 'articles.txt'), 'r') as file:
         urls = file.read().splitlines()
@@ -49,19 +59,26 @@ def process_author_folder(author_folder):
         except Exception as e:
             print(f"Error processing URL {url}: {e}")
 
-    with open(os.path.join(author_folder, 'articles_text.json'), 'w') as file:
+    json_path = os.path.join(author_folder, 'articles_text.json')
+    with open(json_path, 'w') as file:
         json.dump(articles_data, file, indent=4)
+
+    # Compress the JSON file and remove the original
+    compress_file(json_path)
 
 def main():
     authors_dir = './authors'  # Replace with your directory path
-    author_folders = [f for f in os.listdir(authors_dir) if os.path.isdir(os.path.join(authors_dir, f))]
-    total_folders = len(author_folders)
+    author_folders = [os.path.join(authors_dir, f) for f in os.listdir(authors_dir) if os.path.isdir(os.path.join(authors_dir, f))]
 
-    for index, author_id in enumerate(author_folders, start=1):
-        print(f"Processing folder {index} of {total_folders}: {author_id}")
-        author_folder = os.path.join(authors_dir, author_id)
-        process_author_folder(author_folder)
-        print(f"Finished processing folder {index} of {total_folders}: {author_id}")
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = {executor.submit(process_author_folder, author_folder): author_folder for author_folder in author_folders}
+        for future in concurrent.futures.as_completed(futures):
+            folder = futures[future]
+            try:
+                future.result()
+                print(f"Finished processing folder: {folder}")
+            except Exception as e:
+                print(f"Error processing folder {folder}: {e}")
 
 if __name__ == '__main__':
     main()
