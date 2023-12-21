@@ -50,6 +50,11 @@ def compress_file(file_path):
     os.remove(file_path)
 
 def process_author_folder(author_folder):
+    compressed_file_path = os.path.join(author_folder, 'articles_text.json.gz')
+    if os.path.exists(compressed_file_path):
+        print(f"Compressed file already exists for {author_folder}, skipping.")
+        return
+    
     with open(os.path.join(author_folder, 'articles.txt'), 'r') as file:
         urls = file.read().splitlines()
     
@@ -58,7 +63,7 @@ def process_author_folder(author_folder):
     for index, url in enumerate(urls, start=1):
         print(f"Processing URL {index} of {total_urls} in folder {author_folder}")
         try:
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)  # Setting a timeout of 10 seconds
             # print(f"URL: {url}, Status Code: {response.status_code}")
             article_text = extract_text_from_html(response.content)
             # print(f"Extracted text length for {url}: {len(article_text)}")
@@ -66,17 +71,16 @@ def process_author_folder(author_folder):
 
             if word_count >= 50:
                 articles_data.append({url: article_text})
+        except requests.exceptions.Timeout:
+            print(f"Timeout occurred while processing URL {url}")
         except Exception as e:
             print(f"Error processing URL {url}: {e}")
-
-    # print("Articles data before compression:", articles_data)  # Debug print
 
     if articles_data:
         json_path = os.path.join(author_folder, 'articles_text.json')
         with open(json_path, 'w') as file:
             json.dump(articles_data, file, indent=4)
 
-        # Compress the JSON file and remove the original
         compress_file(json_path)
     else:
         print("No valid articles to compress.")
@@ -85,13 +89,18 @@ def main():
     authors_dir = './authors'  # Replace with your directory path
     author_folders = [os.path.join(authors_dir, f) for f in os.listdir(authors_dir) if os.path.isdir(os.path.join(authors_dir, f))]
 
+    total_authors = len(author_folders)
+    authors_processed = 0
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         futures = {executor.submit(process_author_folder, author_folder): author_folder for author_folder in author_folders}
         for future in concurrent.futures.as_completed(futures):
             folder = futures[future]
+            authors_processed += 1
+            remaining_authors = total_authors - authors_processed
+            print(f"Finished processing folder: {folder}. Remaining authors: {remaining_authors}")
             try:
                 future.result()
-                print(f"Finished processing folder: {folder}")
             except Exception as e:
                 print(f"Error processing folder {folder}: {e}")
 

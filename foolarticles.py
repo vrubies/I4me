@@ -22,6 +22,7 @@ from tqdm import tqdm
 from tokenizer import Tokenizer
 
 DATA_CACHE_DIR = "authors"
+MODELS_DIR = "tok_models"
 ZIP_DATA_FILE = "articles_text.json.gz"
 
 # Usage example
@@ -47,10 +48,10 @@ def train_vocab(vocab_size):
     assert vocab_size > 0, "Vocab size must be positive"
 
     # output file prefix path for sentencepiece
-    prefix = os.path.join(DATA_CACHE_DIR, f"tok{vocab_size}")
+    prefix = os.path.join(MODELS_DIR, f"tok{vocab_size}")
 
     # how many shards we'll use for vocab training, kept low for efficiency
-    num_shards = 10
+    num_shards = -1
 
     # 1) export a large chunk of text as a single text file tiny.txt
     fool_file = os.path.join(DATA_CACHE_DIR, "fool.txt")
@@ -60,8 +61,11 @@ def train_vocab(vocab_size):
 
     print(f"Writing temporary file {fool_file} with {num_shards} shards...")
     with open(fool_file, "w", encoding="utf-8") as of:
-        for auth in author_folders[:num_shards]:
+        for auth in tqdm(author_folders[:num_shards]):
             zipped_f = os.path.join(auth, ZIP_DATA_FILE)
+            if not os.path.exists(zipped_f):
+                print(f"File {zipped_f} does not exist")
+                continue
             with gzip.open(zipped_f, 'rt', encoding='utf-8') as f_in:
                 data = f_in.read()
                 data = json.loads(data)
@@ -77,7 +81,7 @@ def train_vocab(vocab_size):
                                    model_prefix=prefix,
                                    model_type="bpe",
                                    vocab_size=vocab_size,
-                                   self_test_sample_size=0,
+                                   self_test_sample_size=0.1,
                                    input_format="text",
                                    character_coverage=1.0,
                                    num_threads=os.cpu_count(),
@@ -96,16 +100,41 @@ def train_vocab(vocab_size):
     print(f"Trained tokenizer is in {prefix}.model")
     print("Done.")
 
+def pretokenize(vocab_size):
+    # iterate the shards and tokenize all of them one by one
+    data_dir = DATA_CACHE_DIR
+    author_folders = [os.path.join(DATA_CACHE_DIR, f) for f in os.listdir(DATA_CACHE_DIR) if os.path.isdir(os.path.join(DATA_CACHE_DIR, f))]
+
+    if vocab_size > 0:
+        # .bin files will be saved into tok{N} directory, create it once here
+        bin_dir = os.path.join(MODELS_DIR, f"tok{vocab_size}")
+        os.makedirs(bin_dir, exist_ok=True)
+
+    shard_filenames = []
+    for auth in tqdm(author_folders):
+        zipped_f = os.path.join(auth, ZIP_DATA_FILE)
+        if not os.path.exists(zipped_f):
+            print(f"File {zipped_f} does not exist")
+            continue
+        shard_filenames.append(zipped_f)
+
+    # process all the shards in a process pool
+    fun = partial(process_shard, vocab_size=vocab_size)
+    with ProcessPoolExecutor() as executor:
+        executor.map(fun, enumerate(shard_filenames))
+    print("Done.")
 
 def process_shard(args, vocab_size):
     shard_id, shard = args
     tokenizer_model = get_tokenizer_model_path(vocab_size)
     enc = Tokenizer(tokenizer_model)
-    with open(shard, "r") as f:
-        data = json.load(f)
+    # open zip file and read all the data into memory
+    with gzip.open(shard, 'rt', encoding='utf-8') as f_in:
+        data = f_in.read()
+        data = json.loads(data)
     all_tokens = []
     for example in tqdm(data, position=shard_id):
-        text = example["story"]
+        text = next(iter(example.values()))
         text = text.strip()  # get rid of leading/trailing whitespace
         tokens = enc.encode(text, bos=True, eos=False)  # encode the text, use BOS
         all_tokens.extend(tokens)
@@ -117,9 +146,9 @@ def process_shard(args, vocab_size):
         tokenized_filename = shard.replace(".json", ".bin")
     else:
         # save .bin files into a new tok{N} directory
-        bin_dir = os.path.join(DATA_CACHE_DIR, f"tok{vocab_size}")
+        bin_dir = os.path.join(MODELS_DIR, f"tok{vocab_size}")
         shard_basename = os.path.basename(shard)
-        bin_basename = shard_basename.replace(".json", ".bin")
+        bin_basename = shard_basename.replace(".json.gz", "_" + str(shard_id) + ".bin")
         tokenized_filename = os.path.join(bin_dir, bin_basename)
     # write the bytes
     with open(tokenized_filename, "wb") as f:
@@ -127,23 +156,6 @@ def process_shard(args, vocab_size):
     # calculate the average sequence length (they are separated by BOS=1)
     avg_seq_len = all_tokens.size / ((all_tokens == 1).sum())
     print(f"Saved {tokenized_filename}, average seqlen: {avg_seq_len:.2f}")
-
-
-def pretokenize(vocab_size):
-    # iterate the shards and tokenize all of them one by one
-    data_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
-    shard_filenames = sorted(glob.glob(os.path.join(data_dir, "*.json")))
-    if vocab_size > 0:
-        # .bin files will be saved into tok{N} directory, create it once here
-        bin_dir = os.path.join(DATA_CACHE_DIR, f"tok{vocab_size}")
-        os.makedirs(bin_dir, exist_ok=True)
-
-    # process all the shards in a process pool
-    fun = partial(process_shard, vocab_size=vocab_size)
-    with ProcessPoolExecutor() as executor:
-        executor.map(fun, enumerate(shard_filenames))
-    print("Done.")
-
 
 class PretokDataset(torch.utils.data.IterableDataset):
     """Loads pretokenized examples from disk and yields them as PyTorch tensors."""
@@ -167,11 +179,11 @@ class PretokDataset(torch.utils.data.IterableDataset):
         print(f"Created a PretokDataset with rng seed {seed}")
         if self.vocab_source == "llama2":
             # the .bin files are right along the .json files
-            bin_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
+            bin_dir = os.path.join(MODELS_DIR, "TinyStories_all_data")
             shard_filenames = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
         elif self.vocab_source == "custom":
             # the .bin files are in tok{N} directory
-            bin_dir = os.path.join(DATA_CACHE_DIR, f"tok{self.vocab_size}")
+            bin_dir = os.path.join(MODELS_DIR, f"tok{self.vocab_size}")
             shard_filenames = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
         # train/test split. let's use only shard 0 for test split, rest train
         shard_filenames = shard_filenames[1:] if self.split == "train" else shard_filenames[:1]
@@ -207,7 +219,7 @@ def get_tokenizer_model_path(vocab_size):
     if vocab_size == 0:
         return None
     else:
-        return os.path.join(DATA_CACHE_DIR, f"tok{vocab_size}.model")
+        return os.path.join(MODELS_DIR, f"tok{vocab_size}.model")
 
 class Task:
 
